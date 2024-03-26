@@ -1,5 +1,6 @@
 use crate::{time::TimeSource, Cleanup, Value};
 use std::{
+    borrow::Borrow,
     collections::HashMap,
     hash::Hash,
     sync::RwLock,
@@ -99,7 +100,11 @@ where
     /// Removes the given key-value pair from the map and
     /// returns the value if it was previously in the map
     /// and is not expired.
-    pub fn remove(&self, key: &K) -> Option<V> {
+    pub fn remove<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let mut m = self.inner.write().unwrap();
         m.remove(key).and_then(|v| v.value_checked())
     }
@@ -177,11 +182,13 @@ where
     ///
     /// If the given key-value pair is expired and not cleaned
     /// up yet, it will be removed from the map automatically.
-    pub fn get_value(&self, key: &K) -> Option<Value<V, TS>> {
+    pub fn get_value<Q>(&self, key: &Q) -> Option<Value<V, TS>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let v = self.get_value_unchecked(key);
-        let Some(v) = v else {
-            return None;
-        };
+        let v = v?;
         if v.is_expired() {
             self.remove(key);
             return None;
@@ -191,7 +198,11 @@ where
 
     /// Retrieves the raw [`Value`] wrapper by the given key
     /// without checking expiry.
-    pub fn get_value_unchecked(&self, key: &K) -> Option<Value<V, TS>> {
+    pub fn get_value_unchecked<Q>(&self, key: &Q) -> Option<Value<V, TS>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let m = self.inner.read().unwrap();
         m.get(key).cloned()
     }
@@ -245,7 +256,6 @@ impl<K, V> Default for TimedMap<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cleanup::Cleanup;
     use mock_instant::{Instant, MockClock};
 
     #[test]
@@ -275,6 +285,18 @@ mod tests {
         assert!(!tm.contains(&"a"));
         assert_eq!(tm.len(), 0);
         assert!(tm.is_empty());
+    }
+
+    #[test]
+    fn strings() {
+        let tm: TimedMap<_, _> = TimedMap::new();
+        let s = String::from("foo");
+        tm.insert(s.clone(), "bar", Duration::from_secs(1));
+        tm.get_value(&s);
+        tm.contains(&s);
+        tm.extend(&s, Duration::from_secs(1));
+        tm.get(&s);
+        tm.remove(&s);
     }
 
     #[test]
