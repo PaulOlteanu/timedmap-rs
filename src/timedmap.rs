@@ -1,9 +1,9 @@
+use dashmap::DashMap;
+
 use crate::{time::TimeSource, Cleanup, Value};
 use std::{
     borrow::Borrow,
-    collections::HashMap,
     hash::Hash,
-    sync::RwLock,
     time::{Duration, Instant},
 };
 
@@ -18,12 +18,17 @@ use std::{
 /// tm.insert("foo", "bar", Duration::from_secs(10));
 /// assert_eq!(tm.get(&"foo"), Some("bar"));
 /// ```
-#[derive(Debug)]
 pub struct TimedMap<K, V, TS = Instant> {
-    inner: RwLock<HashMap<K, Value<V, TS>>>,
+    inner: DashMap<K, Value<V, TS>>,
 }
 
-impl<K, V> TimedMap<K, V> {
+impl<K, V> std::fmt::Debug for TimedMap<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TimedMap")
+    }
+}
+
+impl<K: Eq + Hash, V> TimedMap<K, V> {
     /// Create a new instance of [`TimedMap`] with the default
     /// [`TimeSource`] implementation [`Instant`].
     pub fn new() -> Self {
@@ -31,12 +36,12 @@ impl<K, V> TimedMap<K, V> {
     }
 }
 
-impl<K, V, TS> TimedMap<K, V, TS> {
+impl<K: Eq + Hash, V, TS> TimedMap<K, V, TS> {
     /// Create a new instance of [`TimedMap`] with a custom
     /// [`TimeSource`] implementation.
     pub fn new_with_timesource() -> Self {
         Self {
-            inner: RwLock::new(HashMap::new()),
+            inner: DashMap::new(),
         }
     }
 }
@@ -66,8 +71,7 @@ where
     /// assert_eq!(tm.get(&"foo"), None);
     /// ```
     pub fn insert(&self, key: K, value: V, lifetime: Duration) {
-        let mut m = self.inner.write().unwrap();
-        m.insert(key, Value::new(value, lifetime));
+        self.inner.insert(key, Value::new(value, lifetime));
     }
 
     /// Returns a copy of the value corresponding to the
@@ -105,8 +109,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let mut m = self.inner.write().unwrap();
-        m.remove(key).and_then(|v| v.value_checked())
+        self.inner.remove(key).and_then(|(_, v)| v.value_checked())
     }
 
     /// Sets the lifetime of the value coresponding to the
@@ -119,9 +122,8 @@ where
             return false;
         };
 
-        let mut m = self.inner.write().unwrap();
         v.set_expiry(new_lifetime);
-        m.insert(key.clone(), v);
+        self.inner.insert(key.clone(), v);
 
         true
     }
@@ -136,9 +138,8 @@ where
             return false;
         };
 
-        let mut m = self.inner.write().unwrap();
         v.add_expiry(added_lifetime);
-        m.insert(key.clone(), v);
+        self.inner.insert(key.clone(), v);
 
         true
     }
@@ -146,21 +147,18 @@ where
     /// Returns the number of key-value pairs in the map
     /// which have not been expired.
     pub fn len(&self) -> usize {
-        let m = self.inner.read().unwrap();
-        m.iter().filter(|(_, v)| !v.is_expired()).count()
+        self.inner.iter().filter(|v| !v.is_expired()).count()
     }
 
     /// Returns `true` when the map does not contain any
     /// non-expired key-value pair.
     pub fn is_empty(&self) -> bool {
-        let m = self.inner.read().unwrap();
-        m.len() == 0
+        self.inner.len() == 0
     }
 
     /// Clears the map, removing all key-value pairs.
     pub fn clear(&self) {
-        let mut m = self.inner.write().unwrap();
-        m.clear();
+        self.inner.clear();
     }
 
     /// Create a snapshot of the current state of the maps
@@ -169,11 +167,9 @@ where
     /// It does only contain all non-expired key-value pairs.
     pub fn snapshot<B: FromIterator<(K, V)>>(&self) -> B {
         self.inner
-            .read()
-            .unwrap()
             .iter()
-            .filter(|(_, v)| !v.is_expired())
-            .map(|(k, v)| (k.clone(), v.value()))
+            .filter(|v| !v.is_expired())
+            .map(|kv| (kv.key().clone(), kv.value().value()))
             .collect()
     }
 
@@ -203,8 +199,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let m = self.inner.read().unwrap();
-        m.get(key).cloned()
+        self.inner.get(key).map(|x| x.value().clone())
     }
 }
 
@@ -219,12 +214,11 @@ where
 
         let mut keys = vec![];
         {
-            let m = self.inner.read().unwrap();
             keys.extend(
-                m.iter()
-                    .filter(|(_, val)| val.is_expired_at(&now))
-                    .map(|(key, _)| key)
-                    .cloned(),
+                self.inner
+                    .iter()
+                    .filter(|val| val.is_expired_at(&now))
+                    .map(|kv| kv.key().clone()),
             );
         }
 
@@ -232,9 +226,8 @@ where
             return;
         }
 
-        let mut m = self.inner.write().unwrap();
         for key in keys {
-            m.remove(&key);
+            self.inner.remove(&key);
         }
 
         // TODO: Maybe shrink the map down if it exceeds a predefined
@@ -245,7 +238,7 @@ where
     }
 }
 
-impl<K, V> Default for TimedMap<K, V> {
+impl<K: Eq + Hash, V> Default for TimedMap<K, V> {
     fn default() -> Self {
         Self {
             inner: Default::default(),
